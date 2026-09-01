@@ -7512,15 +7512,20 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
     for (const lane of ["mock_parity", "buzz", "telegram", "discord", "whatsapp", "slack"]) {
       expect(releaseJob.with?.[`run_${lane}`]).toBeUndefined();
     }
+    const manualScenarioGuard =
+      "(github.event_name != 'workflow_dispatch' || inputs.scenario == '')";
     expect(workflowJob(QA_LIVE_TRANSPORTS_WORKFLOW, "run_mock_parity").if).toBe(
-      "inputs.expected_sha == '' || inputs.run_mock_parity",
+      `(inputs.expected_sha == '' || inputs.run_mock_parity) && ${manualScenarioGuard}`,
     );
     expect(workflowJob(QA_LIVE_TRANSPORTS_WORKFLOW, "run_live_matrix").if).toBe(
-      "inputs.expected_sha == '' || inputs.run_matrix",
+      `(inputs.expected_sha == '' || inputs.run_matrix) && ${manualScenarioGuard}`,
     );
-    for (const channel of ["telegram", "discord", "whatsapp", "slack"]) {
+    expect(workflowJob(QA_LIVE_TRANSPORTS_WORKFLOW, "run_live_telegram").if).toBe(
+      "inputs.expected_sha == '' || inputs.run_telegram",
+    );
+    for (const channel of ["discord", "whatsapp", "slack"]) {
       expect(workflowJob(QA_LIVE_TRANSPORTS_WORKFLOW, `run_live_${channel}`).if).toBe(
-        `inputs.expected_sha == '' || inputs.run_${channel}`,
+        `(inputs.expected_sha == '' || inputs.run_${channel}) && ${manualScenarioGuard}`,
       );
     }
     expect(releaseWorkflow).not.toContain("qa_live_matrix_release_checks");
@@ -7563,6 +7568,60 @@ printf '%s\\n' "$DEEPSEEK_API_KEY" "$DEEPINFRA_API_KEY"`,
     expect(releaseTelegramWorkflow).toContain(
       'echo "Telegram live lane failed on attempt ${attempt}; retrying once..." >&2',
     );
+  });
+
+  it("validates an open same-repository PR head without fetching refs", () => {
+    const validateStep = workflowStep(
+      workflowJob(QA_LIVE_TRANSPORTS_WORKFLOW, "validate_selected_ref"),
+      "Validate selected ref",
+    );
+    const workdir = tempDirs.make("qa-live-open-pr-head-");
+    const fakeBin = resolve(workdir, "bin");
+    const outputPath = resolve(workdir, "output");
+    const selectedRevision = "a".repeat(40);
+    mkdirSync(fakeBin);
+    writeFileSync(
+      resolve(fakeBin, "git"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "rev-parse HEAD" ]]; then
+  printf '%s\\n' "$SELECTED_REVISION"
+  exit 0
+fi
+if [[ "$1" == "fetch" ]]; then
+  exit 97
+fi
+exit 64
+`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      resolve(fakeBin, "gh"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '1\\n'
+`,
+      { mode: 0o755 },
+    );
+
+    const result = spawnSync("bash", ["-c", validateStep.run ?? ""], {
+      cwd: workdir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        EXPECTED_SHA: "",
+        GITHUB_OUTPUT: outputPath,
+        GITHUB_REPOSITORY: "openclaw/openclaw",
+        GITHUB_STEP_SUMMARY: resolve(workdir, "summary"),
+        INPUT_REF: selectedRevision,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        SELECTED_REVISION: selectedRevision,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(outputPath, "utf8")).toContain(`selected_revision=${selectedRevision}`);
+    expect(readFileSync(outputPath, "utf8")).toContain("trusted_reason=open-pr-head");
   });
 
   it("routes release Buzz through the QA Lab selector", () => {
